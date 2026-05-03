@@ -28,13 +28,23 @@ import re
 import os
 import datetime
 import warnings
+
+try:
+    import fitz
+except ImportError:
+    fitz = None
+
+try:
+    import pdfplumber
+except ImportError:
+    pdfplumber = None
 from pathlib import Path
 from typing import Optional
 
 warnings.filterwarnings("ignore")
 
 # ── Model ──────────────────────────────────────────────────────
-ROBERTA_MODEL = "/content/drive/MyDrive/Graduation Project/fine_tuned_roberta"
+ROBERTA_MODEL = "fine_tuned_roberta"
 
 # Inferred label mapping
 LABEL_MAP = {
