@@ -15,6 +15,7 @@ Run:
 """
 
 import streamlit as st
+
 import os
 import sys
 
@@ -27,10 +28,10 @@ st.set_page_config(
 )
 
 # ── Paths ───────────────────────────────────────────────────────
-DRIVE_BASE       = "/content/drive/Graduation Project/dataset_test2"
-OPTISCHOLAR_PATH = f"{DRIVE_BASE}/scholarships_final_ready-2.csv"
-STUDENTS_PATH    = f"{DRIVE_BASE}/nigerian_students_v2.csv"
-INTERACTIONS_PATH= f"{DRIVE_BASE}/nigerian_ncf_data_v2.csv"
+DRIVE_BASE       = "."
+OPTISCHOLAR_PATH = "scholarships_final_ready-2.csv"
+STUDENTS_PATH    = "nigerian_students_v2.csv"
+INTERACTIONS_PATH= "nigerian_ncf_data_v2.csv"
 TRANSFER_FN_PATH = "transfer_fn_v2.pt"
 NCF_MODEL_PATH   = "ncf_model_v2.pt"
 
@@ -271,17 +272,22 @@ def init_session():
 @st.cache_data(show_spinner=False)
 def load_optischolar():
     import pandas as pd
-    df = pd.read_csv(OPTISCHOLAR_PATH)
-    df.columns = df.columns.str.strip()
-    for col in ["min_gpa_required","funding_amount_raw",
-                "requires_financial_need","eligible_bachelor",
-                "eligible_master","eligible_phd","eligible_high_school"]:
-        df[col] = pd.to_numeric(df.get(col,0), errors="coerce").fillna(0)
-    for col in ["scholarship_title","scholarship_id","description_cleaned",
-                "scholarship_type","citizenship_required"]:
-        if col in df.columns:
-            df[col] = df[col].fillna("").astype(str)
-    return df
+    if not os.path.exists(OPTISCHOLAR_PATH):
+        return None
+    try:
+        df = pd.read_csv(OPTISCHOLAR_PATH)
+        df.columns = df.columns.str.strip()
+        for col in ["min_gpa_required","funding_amount_raw",
+                    "requires_financial_need","eligible_bachelor",
+                    "eligible_master","eligible_phd","eligible_high_school"]:
+            df[col] = pd.to_numeric(df.get(col,0), errors="coerce").fillna(0)
+        for col in ["scholarship_title","scholarship_id","description_cleaned",
+                    "scholarship_type","citizenship_required"]:
+            if col in df.columns:
+                df[col] = df[col].fillna("").astype(str)
+        return df
+    except Exception:
+        return None
 
 
 @st.cache_resource(show_spinner=False)
@@ -295,57 +301,72 @@ def load_models():
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load interactions + students for encoders
-    interactions = pd.read_csv(INTERACTIONS_PATH)
-    students     = pd.read_csv(STUDENTS_PATH)
+    try:
+        if not os.path.exists(INTERACTIONS_PATH) or not os.path.exists(STUDENTS_PATH):
+            raise FileNotFoundError("Data files not found.")
+        interactions = pd.read_csv(INTERACTIONS_PATH)
+        students     = pd.read_csv(STUDENTS_PATH)
 
-    SCHOLARSHIP_TYPES = ["Merit-Based","Need-Based","Academic Excellence",
-                         "Community Service","Athletic"]
+        SCHOLARSHIP_TYPES = ["Merit-Based","Need-Based","Academic Excellence",
+                            "Community Service","Athletic"]
 
-    le_stu    = LabelEncoder().fit(interactions["student_id"])
-    le_sch    = LabelEncoder().fit(interactions["scholarship_id"])
-    le_type   = LabelEncoder().fit(SCHOLARSHIP_TYPES)
-    le_deg    = LabelEncoder().fit(students["degree_level"])
-    le_ses    = LabelEncoder().fit(students["ses_category"])
-    le_gender = LabelEncoder().fit(students["gender"])
-    scaler    = MinMaxScaler().fit(
-        students[["final_gpa","household_income","age"]].fillna(0)
-    )
+        le_stu    = LabelEncoder().fit(interactions["student_id"])
+        le_sch    = LabelEncoder().fit(interactions["scholarship_id"])
+        le_type   = LabelEncoder().fit(SCHOLARSHIP_TYPES)
+        le_deg    = LabelEncoder().fit(students["degree_level"])
+        le_ses    = LabelEncoder().fit(students["ses_category"])
+        le_gender = LabelEncoder().fit(students["gender"])
+        scaler    = MinMaxScaler().fit(
+            students[["final_gpa","household_income","age"]].fillna(0)
+        )
 
-    encoders = {
-        "le_stu": le_stu, "le_sch": le_sch, "le_type": le_type,
-        "le_deg": le_deg, "le_ses": le_ses, "le_gender": le_gender,
-        "scaler": scaler, "DEVICE": DEVICE,
-        "amt_max": interactions["amount"].max()
-    }
+        encoders = {
+            "le_stu": le_stu, "le_sch": le_sch, "le_type": le_type,
+            "le_deg": le_deg, "le_ses": le_ses, "le_gender": le_gender,
+            "scaler": scaler, "DEVICE": DEVICE,
+            "amt_max": interactions["amount"].max()
+        }
+    except Exception as e:
+        encoders = {"DEVICE": DEVICE}
 
     # Load NCF model
-    sys.path.insert(0, ".")
-    try:
-        from ncf_pipeline import NCFModel
-        ncf = NCFModel(len(le_stu.classes_), len(le_sch.classes_),
-                       emb_dim=8, hidden=[32,16], n_sf=6, n_cf=2,
-                       dropout=0.3).to(DEVICE)
-        ncf.load_state_dict(torch.load(NCF_MODEL_PATH,
-                                        map_location=DEVICE))
-        ncf.eval()
+    ncf, student_embs = None, None
+    if "le_stu" in encoders:
+        sys.path.insert(0, ".")
+        try:
+            from ncf_pipeline import NCFModel
+            ncf = NCFModel(len(encoders["le_stu"].classes_),
+                           len(encoders["le_sch"].classes_),
+                           emb_dim=8, hidden=[32,16], n_sf=6, n_cf=2,
+                           dropout=0.3).to(DEVICE)
+            if os.path.exists(NCF_MODEL_PATH):
+                ncf.load_state_dict(torch.load(NCF_MODEL_PATH,
+                                                map_location=DEVICE))
+                ncf.eval()
 
-        # Extract student embeddings
-        idx  = torch.arange(len(le_stu.classes_),
-                             dtype=torch.long).to(DEVICE)
-        with torch.no_grad():
-            student_embs = ncf.get_student_embedding(idx).cpu().numpy()
-    except Exception as e:
-        student_embs = None
-        ncf          = None
+                # Extract student embeddings
+                idx  = torch.arange(len(encoders["le_stu"].classes_),
+                                     dtype=torch.long).to(DEVICE)
+                with torch.no_grad():
+                    student_embs = ncf.get_student_embedding(idx).cpu().numpy()
+            else:
+                ncf = None
+        except Exception as e:
+            student_embs = None
+            ncf          = None
 
     # Load Transfer Function
+    tf = None
     try:
         from ncf_pipeline import TransferFunction
         tf = TransferFunction(in_dim=21, hidden=[128,64,32],
                                dropout=0.3).to(DEVICE)
-        tf.load_state_dict(torch.load(TRANSFER_FN_PATH,
-                                       map_location=DEVICE))
-        tf.eval()
+        if os.path.exists(TRANSFER_FN_PATH):
+            tf.load_state_dict(torch.load(TRANSFER_FN_PATH,
+                                           map_location=DEVICE))
+            tf.eval()
+        else:
+            tf = None
     except Exception as e:
         tf = None
 
@@ -710,6 +731,9 @@ def page_recommendations():
 
     if run or st.session_state.recommendations is not None:
         if run:
+            if opto_df is None:
+                st.error("❌ Scholarship database not loaded. Please check system status in sidebar.")
+                return
             with st.spinner("🤖 Running Transfer Learning model..."):
                 try:
                     recs = _run_recommendations(profile, opto_df, top_n)
@@ -795,8 +819,8 @@ def _run_recommendations(profile, opto_df, top_n=20):
 
     # Load models
     ncf, tf, student_embs, encoders, sbert = load_models()
-    if tf is None:
-        raise ValueError("Transfer Function model not loaded.")
+    if tf is None or student_embs is None or "le_type" not in encoders:
+        raise ValueError("Machine Learning models or encoders not fully loaded.")
 
     DEVICE  = encoders["DEVICE"]
     le_type = encoders["le_type"]
@@ -892,6 +916,9 @@ def page_roadmap():
 
     if run or st.session_state.gap_results is not None:
         if run:
+            if opto_df is None:
+                st.error("❌ Scholarship database not loaded. Please check system status in sidebar.")
+                return
             with st.spinner("🔍 Scanning for near-miss scholarships..."):
                 try:
                     gaps = _run_gap_finder(profile, opto_df, top_n)
@@ -961,6 +988,9 @@ def page_roadmap():
 def _run_gap_finder(profile, opto_df, top_n=10):
     """Run the Gap Finder on OptiScholar scholarships."""
     import re
+
+    if opto_df is None:
+        return None
 
     gpa   = float(profile.get("final_gpa") or profile.get("gpa_proxy") or 0)
     need  = int(profile.get("financial_need", 0))
